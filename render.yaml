@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: genesis-x402-oracle
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: X402_PAY_TO
+        value: A1SkZSKsKTqsBqzVrdECXLmqpVdPCzqZu1kuD3LV7MF6
+      - key: X402_NETWORK
+        value: solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp
+      - key: X402_FACILITATOR_URL
+        value: https://facilitator.payai.network

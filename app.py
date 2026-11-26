@@ -19,15 +19,17 @@ from pydantic import BaseModel
 HL_URL = "https://api.hyperliquid.xyz/info"
 TRACKED_COINS = ["BTC", "ETH", "SOL", "XRP", "DOGE", "AVAX", "LINK", "ARB", "SUI", "HYPE"]
 
-# Solana Mainnet CAIP-2 ID & default PayAI public facilitator (supports Solana Mainnet USDC)
+# Solana Mainnet CAIP-2 ID & optional Base Mainnet EVM wallet + PayAI public facilitator
 DEFAULT_SOLANA_WALLET = "A1SkZSKsKTqsBqzVrdECXLmqpVdPCzqZu1kuD3LV7MF6"
 PAY_TO = os.getenv("X402_PAY_TO", DEFAULT_SOLANA_WALLET).strip()
+PAY_TO_BASE = os.getenv("X402_PAY_TO_BASE", "").strip()
 NETWORK = os.getenv("X402_NETWORK", "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp").strip()
+NETWORK_BASE = "eip155:8453"
 FACILITATOR_URL = os.getenv("X402_FACILITATOR_URL", "https://facilitator.payai.network").strip()
 
 app = FastAPI(
     title="GENESIS x402 Boundary Micro-Oracle (Solana USDC)",
-    version="1.0.0",
+    version="1.1.0",
     description="Zero-auth pay-per-call boundary verification, live perp funding-trap, and SAT solving oracles for AI agents.",
 )
 
@@ -37,6 +39,7 @@ X402_ERROR = None
 if PAY_TO:
     try:
         from x402 import x402ResourceServer
+        from x402.extensions.bazaar import OutputConfig, bazaar_resource_server_extension, declare_discovery_extension
         from x402.http import FacilitatorConfig, HTTPFacilitatorClient, PaymentOption, RouteConfig
         from x402.http.middleware.fastapi import payment_middleware
         from x402.mechanisms.svm.exact import ExactSvmServerScheme
@@ -44,35 +47,98 @@ if PAY_TO:
         facilitator = HTTPFacilitatorClient(FacilitatorConfig(url=FACILITATOR_URL))
         server = x402ResourceServer(facilitator)
         server.register(NETWORK, ExactSvmServerScheme())
+        if hasattr(server, "register_extension"):
+            server.register_extension(bazaar_resource_server_extension)
+
+        if PAY_TO_BASE:
+            try:
+                from x402.mechanisms.evm.exact import ExactEvmServerScheme
+                server.register(NETWORK_BASE, ExactEvmServerScheme())
+            except Exception:
+                pass
+
+        def _opts(price: str):
+            opts = [PaymentOption(scheme="exact", pay_to=PAY_TO, price=price, network=NETWORK)]
+            if PAY_TO_BASE:
+                opts.append(PaymentOption(scheme="exact", pay_to=PAY_TO_BASE, price=price, network=NETWORK_BASE))
+            return opts
 
         routes = {
             "POST /v1/audit/url-boundary": RouteConfig(
-                accepts=PaymentOption(scheme="exact", pay_to=PAY_TO, price="$0.005", network=NETWORK),
+                accepts=_opts("$0.005"),
                 description="Detect HOST_SPLIT / SSRF parser discrepancies across urllib, httpx, yarl, and pydantic_core.",
                 mime_type="application/json",
                 service_name="GENESIS Boundary Oracle",
                 tags=["security", "ssrf", "url-parser", "audit"],
+                extensions=declare_discovery_extension(
+                    input={"url": "https://trusted.com\\@evil.com/path"},
+                    input_schema={
+                        "type": "object",
+                        "properties": {"url": {"type": "string", "description": "URL to audit for cross-parser HOST_SPLIT / SSRF"}},
+                        "required": ["url"],
+                    },
+                    body_type="json",
+                    output=OutputConfig(
+                        example={
+                            "severity": "CRITICAL_HOST_SPLIT",
+                            "host_split_detected": True,
+                            "unique_hosts_seen": ["evil.com", "trusted.com"],
+                        }
+                    ),
+                ),
             ),
             "POST /v1/audit/yaml-boundary": RouteConfig(
-                accepts=PaymentOption(scheme="exact", pay_to=PAY_TO, price="$0.005", network=NETWORK),
+                accepts=_opts("$0.005"),
                 description="Detect YAML config hazards: duplicate keys, YAML 1.1/1.2 boolean traps, and alias bombs.",
                 mime_type="application/json",
                 service_name="GENESIS Boundary Oracle",
                 tags=["security", "yaml", "devops", "audit"],
+                extensions=declare_discovery_extension(
+                    input={"yaml_text": "country: NO\nrole: user\nrole: admin"},
+                    input_schema={
+                        "type": "object",
+                        "properties": {"yaml_text": {"type": "string", "description": "Raw YAML document to audit"}},
+                        "required": ["yaml_text"],
+                    },
+                    body_type="json",
+                    output=OutputConfig(example={"severity": "HIGH", "hazards_count": 2, "pyyaml_safe_load_ok": True}),
+                ),
             ),
             "GET /v1/market/regime-hyperliquid": RouteConfig(
-                accepts=PaymentOption(scheme="exact", pay_to=PAY_TO, price="$0.003", network=NETWORK),
+                accepts=_opts("$0.003"),
                 description="Live Hyperliquid perpetual funding-rate traps and market regime extremes.",
                 mime_type="application/json",
                 service_name="GENESIS Boundary Oracle",
                 tags=["crypto", "hyperliquid", "funding", "regime"],
+                extensions=declare_discovery_extension(
+                    output=OutputConfig(
+                        example={
+                            "source": "hyperliquid_live",
+                            "top_funding_traps": [{"coin": "ARB", "funding_ann_pct": -19.91}],
+                        }
+                    )
+                ),
             ),
             "POST /v1/solve/stillness-sat": RouteConfig(
-                accepts=PaymentOption(scheme="exact", pay_to=PAY_TO, price="$0.004", network=NETWORK),
+                accepts=_opts("$0.004"),
                 description="Solve Boolean CNF-SAT constraints with verified assignment via Differential Stillness.",
                 mime_type="application/json",
                 service_name="GENESIS Boundary Oracle",
                 tags=["sat", "solver", "constraints", "logic"],
+                extensions=declare_discovery_extension(
+                    input={"n_vars": 3, "clauses": [[1, 2], [-1, 3], [-2, -3]], "max_steps": 1000},
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "n_vars": {"type": "integer", "description": "Number of Boolean variables (1..500)"},
+                            "clauses": {"type": "array", "description": "DIMACS-style CNF clauses"},
+                            "max_steps": {"type": "integer", "default": 2000},
+                        },
+                        "required": ["n_vars", "clauses"],
+                    },
+                    body_type="json",
+                    output=OutputConfig(example={"solved": True, "steps": 1, "unsat_clauses": 0}),
+                ),
             ),
         }
 

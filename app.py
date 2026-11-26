@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import re
 import time
+import zlib
 from datetime import datetime, timezone
 from typing import List
 from urllib.parse import urlparse
@@ -65,7 +66,7 @@ if PAY_TO:
 
         routes = {
             "POST /v1/audit/url-boundary": RouteConfig(
-                accepts=_opts("$0.005"),
+                accepts=_opts("$0.01"),
                 description="Detect HOST_SPLIT / SSRF parser discrepancies across urllib, httpx, yarl, and pydantic_core.",
                 mime_type="application/json",
                 service_name="GENESIS Boundary Oracle",
@@ -88,7 +89,7 @@ if PAY_TO:
                 ),
             ),
             "POST /v1/audit/yaml-boundary": RouteConfig(
-                accepts=_opts("$0.005"),
+                accepts=_opts("$0.01"),
                 description="Detect YAML config hazards: duplicate keys, YAML 1.1/1.2 boolean traps, and alias bombs.",
                 mime_type="application/json",
                 service_name="GENESIS Boundary Oracle",
@@ -104,8 +105,25 @@ if PAY_TO:
                     output=OutputConfig(example={"severity": "HIGH", "hazards_count": 2, "pyyaml_safe_load_ok": True}),
                 ),
             ),
+            "POST /v1/audit/automatism-hho": RouteConfig(
+                accepts=_opts("$0.01"),
+                description="Measure algorithmic repetition / bot-like automatism (H_HO via zlib vs random surrogates) in text or agent logs.",
+                mime_type="application/json",
+                service_name="GENESIS Boundary Oracle",
+                tags=["security", "anti-spam", "bot-detection", "entropy", "audit"],
+                extensions=declare_discovery_extension(
+                    input={"text": "buy now click here free offer " * 15},
+                    input_schema={
+                        "type": "object",
+                        "properties": {"text": {"type": "string", "description": "Text or log block to score for algorithmic automatism"}},
+                        "required": ["text"],
+                    },
+                    body_type="json",
+                    output=OutputConfig(example={"hho_score": 0.68, "label": "HIGH_AUTOMATISM_BOT_LIKE", "n_tokens": 90}),
+                ),
+            ),
             "GET /v1/market/regime-hyperliquid": RouteConfig(
-                accepts=_opts("$0.003"),
+                accepts=_opts("$0.005"),
                 description="Live Hyperliquid perpetual funding-rate traps and market regime extremes.",
                 mime_type="application/json",
                 service_name="GENESIS Boundary Oracle",
@@ -120,7 +138,7 @@ if PAY_TO:
                 ),
             ),
             "POST /v1/solve/stillness-sat": RouteConfig(
-                accepts=_opts("$0.004"),
+                accepts=_opts("$0.01"),
                 description="Solve Boolean CNF-SAT constraints with verified assignment via Differential Stillness.",
                 mime_type="application/json",
                 service_name="GENESIS Boundary Oracle",
@@ -155,6 +173,10 @@ class UrlAuditRequest(BaseModel):
 
 class YamlAuditRequest(BaseModel):
     yaml_text: str
+
+
+class AutomatismRequest(BaseModel):
+    text: str
 
 
 class SatRequest(BaseModel):
@@ -315,6 +337,25 @@ def audit_yaml_boundary(req: YamlAuditRequest):
 
     severity = "HIGH" if any(h["type"] in ("YAML_ALIAS_BOMB_RISK", "DUPLICATE_MAPPING_KEY") for h in hazards) else ("MEDIUM" if hazards else "CLEAN")
     return {"severity": severity, "hazards_count": len(hazards), "hazards": hazards, "pyyaml_safe_load_ok": parsed_ok, "parse_error": parse_err}
+
+
+@app.post("/v1/audit/automatism-hho")
+def audit_automatism_hho(req: AutomatismRequest):
+    tokens = re.findall(r"\w+", req.text.lower())
+    if len(tokens) < 30:
+        return {"hho_score": 0.0, "label": "TOO_SHORT", "n_tokens": len(tokens)}
+    raw = " ".join(tokens).encode("utf-8")
+    c_real = len(zlib.compress(raw, level=6))
+    rng = np.random.default_rng(42)
+    arr = list(tokens)
+    c_nulls = []
+    for _ in range(5):
+        rng.shuffle(arr)
+        c_nulls.append(len(zlib.compress(" ".join(arr).encode("utf-8"), level=6)))
+    c_null = float(np.median(c_nulls))
+    hho = round((c_null - c_real) / max(c_null, 1.0), 4)
+    label = "HIGH_AUTOMATISM_BOT_LIKE" if hho > 0.14 else ("MODERATE_TEMPLATE" if hho > 0.06 else "ORGANIC_HUMAN_LIKE")
+    return {"hho_score": hho, "label": label, "n_tokens": len(tokens)}
 
 
 _CACHE = {"ts": 0.0, "data": None}
